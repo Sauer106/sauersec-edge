@@ -2,7 +2,8 @@
 # nyc-vpn - full-tunnel sing-box client for macOS.
 #
 # * Probes REALITY, then CDN, and locks the whole session to the first path that works.
-# * Captures all traffic with a TUN inbound; points every network service's DNS at sing-box.
+# * Captures all traffic with a TUN inbound; points every network service's DNS at sing-box
+#   (via the Mac's own LAN address; pf blocks inbound DNS from the network).
 # * Health-checks internet + lab DNS through the tunnel every 20 s.
 # * Always restores DNS: EXIT trap here, plus a launchd watchdog (nyc-vpn-restore --if-orphaned)
 #   that also runs at boot.
@@ -95,6 +96,8 @@ for r in c['route'].get('rules', []):
 if c['route'].get('final') == 'auto': c['route']['final'] = tag
 for s in c.get('dns', {}).get('servers', []):
     if s.get('detour') == 'auto': s['detour'] = tag
+for i in c['inbounds']:            # listen beyond loopback (see D8)
+    if i.get('tag') == 'dns-in': i['listen'] = '0.0.0.0'
 c['log'] = {'level': 'warn'}
 json.dump(c, open(sys.argv[3], 'w'), indent=2)
 PYEOF
@@ -107,7 +110,7 @@ typeset -a SVCDNS                           # not LINES: that's a zsh special pa
 for svc in "${(@f)$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*')}"; do
   o=$(networksetup -getdnsservers "$svc" 2>&1)
   [[ $o == *rror* ]] && continue
-  [[ $o == There* || $o == *127.0.0.1* ]] && o=Empty
+  [[ $o == There* || $o == *127.0.0.1* || $o == "$(ipconfig getifaddr en0)" ]] && o=Empty
   SVCDNS+=("$svc"$'\t'"${o//$'\n'/ }")
 done
 IFACE=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
@@ -123,6 +126,11 @@ done
 $SB run -c $RUNCFG &
 SB_PID=$!
 { print $$; print $SB_PID; print $PATHTAG; print -l $SVCDNS } > $STATE
+# System DNS points at this Mac's own LAN address (reachable by interface-scoped lookups);
+# pf drops DNS arriving from the network so the Mac isn't an open resolver.
+LANIP=$(ipconfig getifaddr $IFACE); [[ -z $LANIP ]] && LANIP=127.0.0.1
+pfctl -E 2>&1 | awk '/Token/{print $3}' > /var/db/nyc-vpn.pftoken
+echo "block drop in quick on $IFACE proto { tcp udp } to any port 53" | pfctl -a com.apple/nyc-vpn -f - 2>/dev/null
 
 ready=0
 for i in {1..20}; do
@@ -132,7 +140,7 @@ for i in {1..20}; do
 done
 (( ready )) || { echo "Tunnel DNS never came up"; exit 1 }
 
-for l in $SVCDNS; do networksetup -setdnsservers "${l%%$'\t'*}" 127.0.0.1; done
+for l in $SVCDNS; do networksetup -setdnsservers "${l%%$'\t'*}" $LANIP; done
 dscacheutil -flushcache; killall -HUP mDNSResponder
 echo ">>> Connected via ${(U)PATHTAG}: DNS -> tunnel on ${#SVCDNS} network services. Disconnect from the menu bar."
 ping_menu

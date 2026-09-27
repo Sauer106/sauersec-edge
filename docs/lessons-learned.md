@@ -80,22 +80,22 @@ The bugs that took the longest, how each was isolated, and the root cause. Most 
 
 ---
 
-## L8 · One name hung, and only in the system resolver
+## L8 · Some names hung, but only in Safari
 
-**Symptom:** Every SSO-protected app spun forever. `dig` answered A, AAAA and HTTPS (type 65) queries instantly. `dns-sd -G v4` for the SSO hostname never returned, while other names answered in under 100 ms, including other names in the same zone.
+**Symptom:** SSO-protected apps, and later GitHub, spun forever in Safari. Terminal tools (`curl`, `dig`) and other sites worked. `dns-sd -G v4` hung for exactly the names Safari was stuck on (for example `github.githubassets.com`), while other names answered in under 100 ms.
 
-**Isolation:** Wrong hypotheses were ruled out one test at a time:
-- The SSO service was healthy (checked directly by lab IP).
-- The public route was healthy (checked from the VPS).
-- It wasn't IPv6: the AAAA query was answered.
-- It wasn't the HTTPS record: the type 65 query was answered too.
-- A `tcpdump` on `lo0` showed the system resolver **never sent the query** to sing-box.
+**Wrong turns:** The service was healthy. It wasn't AAAA handling or HTTPS (type 65) records either: sing-box answered every query type instantly when asked directly. A per-host exception sending one name to the public resolver *seemed* to fix the SSO host, but only because reconnecting cleared the stuck lookup.
 
-What stood out: the SSO host was the only name in the zone that Pi-hole didn't hold locally, so it was forwarded upstream to the Cloudflare-proxied public record.
+**Isolation:**
+1. `tcpdump` on loopback showed macOS **never sent** the stuck queries to sing-box.
+2. `scutil --dns` showed a second resolver, marked `Scoped` with `if_index: en0`, that also pointed at `127.0.0.1`.
+3. Quitting Safari (dropping its in-flight lookups) made the same name resolve immediately.
 
-**Fix:** Route that one name to the public resolver (still through the tunnel) instead of Pi-hole. The cleaner long-term fix is a Pi-hole local record plus a Traefik route, so every lab-facing name resolves the same way.
+**Root cause:** Safari scopes some lookups to the active interface. A lookup scoped to `en0` can't reach an address that exists only on loopback, so it sits in flight forever. `dns-sd` then attaches to the same stuck lookup, which is why it hung for the same names.
 
-**Takeaway:** Check the result against your hypothesis before applying the fix. Two "obvious" patches (answering AAAA immediately, blocking HTTPS records) would have added config without fixing anything.
+**Fix:** Point system DNS at the Mac's own LAN address, which both scoped and unscoped lookups can reach, and guard it with a pf rule (see D8).
+
+**Takeaway:** Check the result against your hypothesis before applying the fix. Two "obvious" patches (answering AAAA immediately, blocking HTTPS records) would have added config without fixing anything, and a third looked like it worked for the wrong reason.
 
 ---
 

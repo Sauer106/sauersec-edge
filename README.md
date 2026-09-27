@@ -84,6 +84,7 @@ flowchart LR
 | Tagged node + scoped ACL | Tailscale | VPS joins as `tag:vps` with `--accept-dns=false`; ACL grants only the lab subnet and Pi-hole DNS |
 | Access logging off | Xray | `loglevel: warning`, `access: none` — the edge doesn't keep a browsing history |
 | Root-only client config | macOS | Credentials live in `/usr/local/etc/nyc-vpn/client.json` (0600 root); the root job can't be re-pointed by a user-writable file |
+| pf anchor while connected | macOS | Drops DNS arriving from the network, so the tunnel resolver never answers other devices on the network |
 | Scoped sudoers | macOS | Password-free rights for exactly three commands (start, stop, restore DNS) |
 | Credential rotation | Both | UUID rotated after accidental exposure in a screenshot |
 
@@ -94,8 +95,9 @@ The macOS client is a SwiftBar menu bar item driving a root LaunchDaemon. It:
 1. **Probes REALITY first, then CDN**, with a real HTTP 204 check through each — and **locks the session to one path** (no mid-session flapping that drops SSH).
 2. **Captures all traffic** via a sing-box TUN interface (IPv4 + IPv6, so nothing leaks around the tunnel).
 3. **Split DNS:** lab names → Pi-hole *through the tunnel*; everything else → 1.1.1.1 *through the tunnel*; the tunnel's own server name → a DoH bootstrap resolver *outside* it (breaks the resolution loop).
-4. **Health-checks every 20 s** (internet + lab DNS); the icon turns red if traffic stops flowing.
-5. **Always restores DNS**, in three independent layers:
+4. **Points system DNS at the Mac's own LAN address**, guarded by a pf rule, so interface-scoped lookups (Safari) can reach sing-box. The Mac is never an open resolver.
+5. **Health-checks every 20 s** (internet + lab DNS); the icon turns red if traffic stops flowing.
+6. **Always restores DNS**, in three independent layers:
 
 ```mermaid
 flowchart TB
@@ -154,5 +156,6 @@ Xray-core 26.x · sing-box 1.12+ · Cloudflare Tunnel · Tailscale · Pi-hole v6
 - [x] Full-tunnel egress from the VPS; lab access by name through the tunnel
 - [x] Menu bar client with health status, instant cancel/disconnect
 - [ ] Tailscale-conflict guard verified live
-- [ ] Pi-hole local record + Traefik route for the SSO host (removes the DNS exception)
+- [ ] Pi-hole local record + Traefik route for the SSO host (LAN-direct SSO)
+- [ ] Remove the now-unneeded per-host DNS exception after verifying
 - [ ] Migrate Tier 3 transport from WebSocket (deprecated in Xray) to XHTTP

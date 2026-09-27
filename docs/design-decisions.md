@@ -81,11 +81,17 @@ Each entry: the decision, the alternatives considered, and why.
 
 ---
 
-## D8 · Point system DNS at `127.0.0.1`, not a TUN address
+## D8 · Point system DNS at the Mac's own LAN address
 
-**Decision:** sing-box runs a `direct` inbound on `127.0.0.1:53` that hijacks queries into its DNS router. macOS DNS is set to `127.0.0.1` while the tunnel is up.
+**Decision:** sing-box runs a `direct` DNS inbound on port 53 that hijacks queries into its DNS router. While the tunnel is up, macOS DNS is set to **the Mac's own LAN address**. A pf anchor (`com.apple/nyc-vpn`) drops DNS arriving *from* the network, so the Mac is never an open resolver.
 
-**Why:** macOS's resolver (mDNSResponder) binds its queries to the physical interface. So queries to a TUN-side address like `172.19.0.2` left through Wi-Fi and went unanswered. `dig` worked, because it doesn't bind, which hid the problem. Loopback is always reachable.
+**Rejected:**
+- **A TUN address like `172.19.0.2`.** mDNSResponder binds its queries to the physical interface, so they left through Wi-Fi and were never answered.
+- **`127.0.0.1`.** It works for ordinary lookups, but macOS also builds an *interface-scoped* copy of the resolver tied to `en0`. Lookups that apps scope to the active interface (Safari does) couldn't reach loopback and hung forever. See L8.
+
+**Why the LAN address:** it's reachable both from unscoped lookups and from lookups scoped to `en0`. The pf rule only matches traffic arriving *on* `en0`. The Mac's own queries arrive over loopback, so they're unaffected.
+
+**Tradeoff:** the address is fixed for the session, so switching networks mid-session means choosing Reconnect.
 
 ---
 
@@ -108,6 +114,8 @@ Each entry: the decision, the alternatives considered, and why.
 | Disconnect, Ctrl-C, sing-box crash, script error | EXIT trap |
 | `kill -9` on the script | Watchdog (checks the script PID from the state file) |
 | Reboot or power loss mid-session | Watchdog's `RunAtLoad` |
+
+The same restore path also removes the pf anchor and releases the pf enable token.
 
 The state file records each service's **original** DNS, so a manually configured resolver is restored exactly instead of being reset to DHCP.
 

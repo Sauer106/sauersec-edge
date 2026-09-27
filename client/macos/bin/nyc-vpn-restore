@@ -28,6 +28,9 @@ SCRIPT_PID=$(/usr/bin/sed -n 1p $STATE)
 SB_PID=$(/usr/bin/sed -n 2p $STATE)
 if [[ $1 == --if-orphaned ]] && alive "$SCRIPT_PID" 'nyc-vpn$'; then exit 0; fi
 alive "$SB_PID" sing-box && kill "$SB_PID" 2>/dev/null
+/sbin/pfctl -a com.apple/nyc-vpn -F all >/dev/null 2>&1
+[[ -s /var/db/nyc-vpn.pftoken ]] && /sbin/pfctl -X "$(cat /var/db/nyc-vpn.pftoken)" >/dev/null 2>&1
+rm -f /var/db/nyc-vpn.pftoken
 
 first=1; n=0
 /usr/bin/tail -n +4 $STATE | while IFS=$'\t' read -r SVC ORIG; do

@@ -13,6 +13,6 @@ The `auto` (urltest) group is kept for manual `sing-box run` sessions. `nyc-vpn`
 | DNS rule | Why |
 |---|---|
 | Tunnel hostname → `bootstrap` (DoH, no detour) | Prevents a resolution loop once system DNS points at sing-box (L7) |
-| SSO hostname → `public` | Work-around for a macOS resolver hang on a forwarded name (L8) |
+| SSO hostname → `public` | Legacy work-around from before the real L8 fix; safe to remove |
 | Lab suffix → `pihole` through the tunnel | Split-horizon lab names |
 | Everything else → `public` through the tunnel | The local network never sees lookups |

@@ -1,0 +1,64 @@
+{
+  "log": { "level": "warn" },
+  "dns": {
+    "servers": [
+      { "tag": "pihole", "type": "udp", "server": "10.0.2.7", "detour": "auto" },
+      { "tag": "public", "type": "udp", "server": "1.1.1.1", "detour": "auto" },
+      { "tag": "bootstrap", "type": "https", "server": "1.1.1.1" },
+      { "tag": "local", "type": "local" }
+    ],
+    "rules": [
+      { "domain": ["edge.example.com"], "server": "bootstrap" },
+      { "domain": ["sso.example.com"], "server": "public" },
+      { "domain_suffix": ["example.com"], "server": "pihole" }
+    ],
+    "final": "public",
+    "strategy": "ipv4_only"
+  },
+  "inbounds": [
+    { "type": "mixed", "tag": "in", "listen": "127.0.0.1", "listen_port": 2080 },
+    {
+      "type": "tun", "tag": "tun-in",
+      "address": ["172.19.0.1/30", "fdfe:dcba:9876::1/126"],
+      "auto_route": true, "strict_route": true
+    },
+    { "type": "direct", "tag": "dns-in", "listen": "127.0.0.1", "listen_port": 53 }
+  ],
+  "outbounds": [
+    {
+      "type": "vless", "tag": "reality",
+      "server": "<VPS_IP>", "server_port": 443,
+      "uuid": "<UUID>", "flow": "xtls-rprx-vision",
+      "tls": {
+        "enabled": true, "server_name": "www.microsoft.com",
+        "utls": { "enabled": true, "fingerprint": "chrome" },
+        "reality": { "enabled": true, "public_key": "<REALITY_PUBLIC_KEY>", "short_id": "<SHORT_ID>" }
+      }
+    },
+    {
+      "type": "vless", "tag": "cdn",
+      "server": "edge.example.com", "server_port": 443,
+      "uuid": "<UUID>", "packet_encoding": "xudp",
+      "tls": { "enabled": true, "server_name": "edge.example.com", "alpn": ["http/1.1"] },
+      "transport": { "type": "ws", "path": "/<RANDOM_WS_PATH>", "headers": { "Host": "edge.example.com" } }
+    },
+    { "type": "direct", "tag": "direct" },
+    {
+      "type": "urltest", "tag": "auto", "outbounds": ["reality", "cdn"],
+      "url": "https://www.gstatic.com/generate_204", "interval": "1m", "tolerance": 100
+    }
+  ],
+  "route": {
+    "rules": [
+      { "inbound": "dns-in", "action": "hijack-dns" },
+      { "action": "sniff" },
+      { "protocol": "dns", "action": "hijack-dns" },
+      { "domain_suffix": ["example.com"], "action": "resolve" },
+      { "ip_cidr": ["10.0.6.0/24", "10.0.2.7/32", "100.64.0.0/10"], "outbound": "auto" },
+      { "ip_is_private": true, "outbound": "direct" }
+    ],
+    "final": "auto",
+    "auto_detect_interface": true,
+    "default_domain_resolver": { "server": "bootstrap" }
+  }
+}

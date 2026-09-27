@@ -1,0 +1,15 @@
+// Excerpt: what the edge VPS may reach on the tailnet.
+// The VPS joins as tag:vps with `tailscale up --advertise-tags=tag:vps --accept-dns=false`.
+{
+  "tagOwners": {
+    "tag:vps": ["autogroup:admin"],
+  },
+  "grants": [
+    // Lab services subnet (behind Traefik + SSO)
+    { "src": ["tag:vps"], "dst": ["10.0.6.0/24"], "ip": ["tcp:*"] },
+    // Pi-hole: DNS only, admin UI unreachable
+    { "src": ["tag:vps"], "dst": ["10.0.2.7/32"], "ip": ["udp:53", "tcp:53"] },
+    // Admin devices may SSH to the VPS
+    { "src": ["autogroup:admin"], "dst": ["tag:vps"], "ip": ["tcp:22"] },
+  ],
+}

@@ -1,0 +1,2 @@
+# /etc/sudoers.d/nyc-vpn - install with visudo -cf first (see install.sh). Replace <USER>.
+<USER> ALL=(root) NOPASSWD: /bin/launchctl kickstart system/com.sauersec.nyc-vpn, /bin/launchctl kickstart -k system/com.sauersec.nyc-vpn, /bin/launchctl kill TERM system/com.sauersec.nyc-vpn, /usr/local/bin/nyc-vpn-restore

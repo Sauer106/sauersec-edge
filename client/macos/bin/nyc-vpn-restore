@@ -1,0 +1,48 @@
+#!/bin/zsh
+# nyc-vpn-restore - put back the DNS that nyc-vpn changed.
+#
+#   nyc-vpn-restore                 restore now (EXIT trap, "Restore DNS now" menu item)
+#   nyc-vpn-restore --if-orphaned   restore only if nyc-vpn is no longer running
+#                                   (launchd watchdog: every 15 s and at boot)
+#
+# State file (/var/db/nyc-vpn.state):
+#   line 1  nyc-vpn PID        line 2  sing-box PID        line 3  path tag
+#   line 4+ <service>\t<original DNS or "Empty">   (active service first)
+#
+# The active service is restored first and the menu is told right away; the rest follow in
+# parallel. The state file is removed only after all services are done, so an interrupted
+# restore is finished by the next watchdog run.
+
+STATE=/var/db/nyc-vpn.state
+RELEASED=/var/db/nyc-vpn.released
+[[ -f $STATE ]] || exit 0
+
+ping_menu() {
+  local u=$(/usr/bin/stat -f %u /dev/console)
+  [[ $u != 0 ]] && /bin/launchctl asuser $u /usr/bin/sudo -u "#$u" \
+    /usr/bin/open -g "swiftbar://refreshplugin?name=nyc-vpn" >/dev/null 2>&1 &
+}
+alive() { /bin/ps -p "$1" -o command= 2>/dev/null | /usr/bin/grep -q "$2" }
+
+SCRIPT_PID=$(/usr/bin/sed -n 1p $STATE)
+SB_PID=$(/usr/bin/sed -n 2p $STATE)
+if [[ $1 == --if-orphaned ]] && alive "$SCRIPT_PID" 'nyc-vpn$'; then exit 0; fi
+alive "$SB_PID" sing-box && kill "$SB_PID" 2>/dev/null
+
+first=1; n=0
+/usr/bin/tail -n +4 $STATE | while IFS=$'\t' read -r SVC ORIG; do
+  if (( first )); then
+    /usr/sbin/networksetup -setdnsservers "$SVC" ${=ORIG} 2>/dev/null
+    /usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder
+    touch $RELEASED; ping_menu; first=0
+  else
+    /usr/sbin/networksetup -setdnsservers "$SVC" ${=ORIG} 2>/dev/null &
+  fi
+  ((n++))
+done
+wait
+/usr/bin/dscacheutil -flushcache; /usr/bin/killall -HUP mDNSResponder
+rm -f $STATE /var/db/nyc-vpn.health $RELEASED
+/usr/bin/logger "nyc-vpn: DNS restored on $n services"
+echo "$(date '+%H:%M:%S') DNS restored on $n network services"
+ping_menu

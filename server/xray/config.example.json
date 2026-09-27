@@ -1,0 +1,56 @@
+{
+  "log": { "loglevel": "warning", "access": "none" },
+  "inbounds": [
+    {
+      "tag": "vless-reality",
+      "listen": "0.0.0.0",
+      "port": 443,
+      "protocol": "vless",
+      "settings": {
+        "clients": [{ "id": "<UUID>", "flow": "xtls-rprx-vision" }],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "tcp",
+        "security": "reality",
+        "realitySettings": {
+          "dest": "www.microsoft.com:443",
+          "serverNames": ["www.microsoft.com"],
+          "privateKey": "<REALITY_PRIVATE_KEY>",
+          "shortIds": ["<SHORT_ID>"]
+        }
+      },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
+    },
+    {
+      "tag": "vless-ws-cdn",
+      "listen": "127.0.0.1",
+      "port": 10000,
+      "protocol": "vless",
+      "settings": { "clients": [{ "id": "<UUID>" }], "decryption": "none" },
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "/<RANDOM_WS_PATH>" } },
+      "sniffing": { "enabled": true, "destOverride": ["http", "tls", "quic"], "routeOnly": true }
+    }
+  ],
+  "outbounds": [
+    { "protocol": "freedom", "tag": "direct" },
+    { "protocol": "blackhole", "tag": "block" }
+  ],
+  "routing": {
+    "domainStrategy": "IPIfNonMatch",
+    "rules": [
+      {
+        "type": "field",
+        "ip": ["10.0.6.0/24", "10.0.2.7/32", "100.64.0.0/10", "fd7a:115c:a1e0::/48"],
+        "outboundTag": "direct"
+      },
+      {
+        "type": "field",
+        "ip": ["0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16", "172.16.0.0/12",
+               "192.168.0.0/16", "::1/128", "fc00::/7", "fe80::/10"],
+        "outboundTag": "block"
+      },
+      { "type": "field", "network": "tcp,udp", "outboundTag": "direct" }
+    ]
+  }
+}

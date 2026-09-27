@@ -1,0 +1,153 @@
+#!/bin/zsh
+# nyc-vpn - full-tunnel sing-box client for macOS.
+#
+# * Probes REALITY, then CDN, and locks the whole session to the first path that works.
+# * Captures all traffic with a TUN inbound; points every network service's DNS at sing-box.
+# * Health-checks internet + lab DNS through the tunnel every 20 s.
+# * Always restores DNS: EXIT trap here, plus a launchd watchdog (nyc-vpn-restore --if-orphaned)
+#   that also runs at boot.
+#
+# Runs as a LaunchDaemon (com.sauersec.nyc-vpn) started/stopped from the SwiftBar plugin.
+
+[[ $EUID -ne 0 ]] && exec sudo "$0" "$@"
+
+CFG=/usr/local/etc/nyc-vpn/client.json
+SB=/opt/homebrew/bin/sing-box
+PY=/opt/homebrew/bin/python3
+RUNCFG=/var/run/nyc-vpn.json
+STATE=/var/db/nyc-vpn.state
+HEALTH=/var/db/nyc-vpn.health
+STOPPING=/var/db/nyc-vpn.stopping
+RELEASED=/var/db/nyc-vpn.released
+RESTORE=/usr/local/bin/nyc-vpn-restore
+LAB_PROBE_NAME=proxmox.example.com       # a lab name that must resolve to 10.x through the tunnel
+PROBE_URL=https://www.gstatic.com/generate_204
+
+HPID=""; PROBE_PID=""; CURL_PID=""; SB_PID=""
+
+ping_menu() {  # ask SwiftBar (running as the console user) to redraw now
+  local u=$(/usr/bin/stat -f %u /dev/console)
+  [[ $u != 0 ]] && /bin/launchctl asuser $u /usr/bin/sudo -u "#$u" \
+    /usr/bin/open -g "swiftbar://refreshplugin?name=nyc-vpn" >/dev/null 2>&1 &
+}
+
+# Armed first, so Cancel at any stage cleans up. Waits below use `cmd & wait $!` so the trap fires immediately.
+trap 'touch $STOPPING; ping_menu; [[ -n $HPID ]] && pkill -P $HPID; kill $HPID $PROBE_PID $CURL_PID $SB_PID 2>/dev/null; $RESTORE' EXIT
+trap 'exit 130' INT TERM HUP
+
+echo "\n=== $(date '+%Y-%m-%d %H:%M:%S') session start ==="
+rm -f $STOPPING $RELEASED; ping_menu
+$RESTORE                                   # clean up anything a previous session left behind
+
+# Tailscale and the TUN both claim 100.64.0.0/10
+if ifconfig | awk '/^[a-z]/{u=($1 ~ /^utun/)} u && /inet 100\./{f=1} END{exit !f}'; then
+  echo "Tailscale is connected - disconnect it first, then connect again."; exit 1
+fi
+
+$SB check -c $CFG || { echo "Config check failed (sing-box upgraded?)"; exit 1 }
+
+# ---------------------------------------------------------------- path selection
+probe() {  # $1 = outbound tag; succeeds if PROBE_URL returns 204 through it
+  local t=/var/run/nyc-vpn-probe.json
+  $PY - "$CFG" "$1" "$t" <<'PYEOF'
+import json, sys
+c = json.load(open(sys.argv[1]))
+ob = next(o for o in c['outbounds'] if o.get('tag') == sys.argv[2])
+ob.pop('domain_resolver', None)
+json.dump({"log": {"level": "error"},
+           "inbounds": [{"type": "mixed", "listen": "127.0.0.1", "listen_port": 20808}],
+           "outbounds": [ob]}, open(sys.argv[3], 'w'))
+PYEOF
+  chmod 600 $t
+  $SB run -c $t >/dev/null 2>&1 &
+  PROBE_PID=$!; local pid=$PROBE_PID
+  sleep 1 & wait $!
+  curl -s -o /dev/null -w '%{http_code}' --max-time 6 -x socks5h://127.0.0.1:20808 \
+    $PROBE_URL > /var/run/nyc-vpn-probe.code &
+  CURL_PID=$!; wait $CURL_PID
+  local code=$(</var/run/nyc-vpn-probe.code); rm -f /var/run/nyc-vpn-probe.code
+  kill $pid 2>/dev/null; wait $pid 2>/dev/null
+  rm -f $t
+  [[ $code == 204 ]]
+}
+
+echo "Testing REALITY..."
+if probe reality; then
+  PATHTAG=reality
+else
+  echo "REALITY unavailable here, testing CDN..."
+  if probe cdn; then PATHTAG=cdn
+  else
+    echo "Neither REALITY nor CDN works on this network."
+    echo "If it has a login page, use 'Open network login page' in the menu, log in, then connect again."
+    exit 1
+  fi
+fi
+echo ">>> Using ${(U)PATHTAG} for this session"
+
+# Session config: drop the urltest group and pin every reference to the chosen path
+$PY - "$CFG" "$PATHTAG" "$RUNCFG" <<'PYEOF'
+import json, sys
+c = json.load(open(sys.argv[1])); tag = sys.argv[2]
+c['outbounds'] = [o for o in c['outbounds'] if o.get('type') != 'urltest']
+for r in c['route'].get('rules', []):
+    if r.get('outbound') == 'auto': r['outbound'] = tag
+if c['route'].get('final') == 'auto': c['route']['final'] = tag
+for s in c.get('dns', {}).get('servers', []):
+    if s.get('detour') == 'auto': s['detour'] = tag
+c['log'] = {'level': 'warn'}
+json.dump(c, open(sys.argv[3], 'w'), indent=2)
+PYEOF
+chmod 600 $RUNCFG
+$SB check -c $RUNCFG || exit 1
+
+# ---------------------------------------------------------------- DNS bookkeeping
+# Record the original DNS of every enabled service (active service first, for a fast restore).
+typeset -a SVCDNS                           # not LINES: that's a zsh special parameter
+for svc in "${(@f)$(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*')}"; do
+  o=$(networksetup -getdnsservers "$svc" 2>&1)
+  [[ $o == *rror* ]] && continue
+  [[ $o == There* || $o == *127.0.0.1* ]] && o=Empty
+  SVCDNS+=("$svc"$'\t'"${o//$'\n'/ }")
+done
+IFACE=$(route -n get default 2>/dev/null | awk '/interface:/{print $2}')
+PRIMARY=$(networksetup -listnetworkserviceorder \
+  | awk -v d="Device: $IFACE)" 'index($0,d){print prev} {prev=$0}' | sed -E 's/^\([0-9*]+\) //')
+for (( i = 1; i <= $#SVCDNS; i++ )); do
+  if [[ ${SVCDNS[i]%%$'\t'*} == $PRIMARY ]]; then
+    SVCDNS=("${SVCDNS[i]}" "${(@)SVCDNS[1,i-1]}" "${(@)SVCDNS[i+1,-1]}"); break
+  fi
+done
+
+# ---------------------------------------------------------------- bring the tunnel up
+$SB run -c $RUNCFG &
+SB_PID=$!
+{ print $$; print $SB_PID; print $PATHTAG; print -l $SVCDNS } > $STATE
+
+ready=0
+for i in {1..20}; do
+  kill -0 $SB_PID 2>/dev/null || { echo "sing-box exited"; exit 1 }
+  dig @127.0.0.1 +short +time=1 +tries=1 apple.com >/dev/null 2>&1 && { ready=1; break }
+  sleep 1 & wait $!
+done
+(( ready )) || { echo "Tunnel DNS never came up"; exit 1 }
+
+for l in $SVCDNS; do networksetup -setdnsservers "${l%%$'\t'*}" 127.0.0.1; done
+dscacheutil -flushcache; killall -HUP mDNSResponder
+echo ">>> Connected via ${(U)PATHTAG}: DNS -> tunnel on ${#SVCDNS} network services. Disconnect from the menu bar."
+ping_menu
+
+# ---------------------------------------------------------------- health check
+( prev=""
+  while kill -0 $SB_PID 2>/dev/null; do
+    net=fail; lab=fail
+    [[ $(curl -s -o /dev/null -w '%{http_code}' --max-time 6 $PROBE_URL) == 204 ]] && net=ok
+    [[ $(dig @127.0.0.1 +short +time=3 +tries=1 $LAB_PROBE_NAME) == 10.* ]] && lab=ok
+    print "$net $lab $(date +%s)" > $HEALTH
+    [[ "$net $lab" != "$prev" ]] && ping_menu; prev="$net $lab"
+    [[ $net == fail || $lab == fail ]] && echo "$(date '+%H:%M:%S') health: internet=$net lab=$lab"
+    sleep 20 & wait $!
+  done ) &
+HPID=$!
+
+wait $SB_PID

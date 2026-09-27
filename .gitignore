@@ -1,0 +1,4 @@
+# never commit filled-in configs
+client.json
+config.json
+*.bak*
